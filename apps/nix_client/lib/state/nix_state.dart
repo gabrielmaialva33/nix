@@ -176,6 +176,7 @@ class NixState extends ChangeNotifier {
   }
 
   // Banco de Dados Local Cifrado & KeyVault (P0-2)
+  bool _disposed = false;
   LocalDatabase? _localDatabase;
   late final KeyVault _keyVault;
   Uint8List? _activeMasterKey;
@@ -433,6 +434,7 @@ class NixState extends ChangeNotifier {
     bool bindToOsKeyring = false,
     String? duressPassphrase,
   }) async {
+    if (_disposed) return false;
     try {
       Uint8List masterKey;
       if (await _keyVault.isInitialized(customPath: customVaultPath)) {
@@ -454,20 +456,32 @@ class NixState extends ChangeNotifier {
         );
       }
 
-      _activeMasterKey = Uint8List.fromList(masterKey);
-      _localDatabase = await LocalDatabase.open(
+      final database = await LocalDatabase.open(
         path: customDbPath,
         rawCipherKey: Uint8List.fromList(masterKey),
         migration001Sql: migration001Sql,
         migration002Sql: migration002Sql,
       );
 
+      // O descarte pode ocorrer durante a derivação da chave ou abertura do banco.
+      // Não publica recursos nem notifica ouvintes depois desse ponto.
+      if (_disposed) {
+        try {
+          await database.close();
+        } finally {
+          _keyVault.lock();
+        }
+        return false;
+      }
+      _activeMasterKey = Uint8List.fromList(masterKey);
+      _localDatabase = database;
       _instantiateRepositories();
       _requiresPassphraseUnlock = false;
 
       notifyListeners();
       return true;
     } catch (e) {
+      if (_disposed) _keyVault.lock();
       debugPrint('[NixState] Erro ao inicializar banco de dados cifrado: $e');
       return false;
     }
@@ -3242,10 +3256,38 @@ class NixState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ChangeNotifier.dispose é síncrono. A limpeza continua sem bloquear a UI;
+  // falhas de um serviço não impedem os demais nem deixam o cofre desbloqueado.
+  Future<void> _disposeServices() async {
+    try {
+      _embeddedTor.dispose();
+    } catch (_) {
+      // Continua a liberação dos recursos locais mesmo se o Tor falhar.
+    }
+    try {
+      _bluetoothMesh.setMeshEnabled(false);
+      _bluetoothMesh.dispose();
+    } catch (_) {
+      // Continua o fechamento do banco mesmo se a malha falhar.
+    }
+    try {
+      await _localDatabase?.close();
+    } catch (_) {
+      // O bloqueio do cofre é obrigatório mesmo se o fechamento falhar.
+    } finally {
+      _localDatabase = null;
+      _activeMasterKey?.fillRange(0, _activeMasterKey!.length, 0);
+      _activeMasterKey = null;
+      _keyVault.lock();
+    }
+  }
+
   @override
   void dispose() {
+    _disposed = true;
     _hoverDebounceTimer?.cancel();
     _callTimer?.cancel();
+    unawaited(_disposeServices());
     super.dispose();
   }
 }
