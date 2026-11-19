@@ -11,8 +11,6 @@
   "files.eol": "\n",
 
   // Flutter / Dart configuration
-  "dart.flutterSdkPath": "/home/gus/.local/opt/flutter",
-  "dart.sdkPath": "/home/gus/.local/opt/flutter/bin/cache/dart-sdk",
   "[dart]": {
     "editor.formatOnSave": true,
     "editor.formatOnType": true,
